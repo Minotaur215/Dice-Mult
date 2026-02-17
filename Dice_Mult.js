@@ -1,6 +1,6 @@
 /*:
  * @target MV
- * @plugindesc Dice Roll for Skills and Items - displays roll in battle log
+ * @plugindesc Dice Roll for Skills and Items
  * @author Minotaur1
  *
  * @param DefaultDiceSides
@@ -16,64 +16,140 @@
  * @min 0
  * @decimals 2
  * @default 1
- * @desc Default multiplier for damage calculation if not specified in skill/item notetag.
+ * @desc Default multiplier for damage/effect calculation if not specified in skill/item notetag.
  *
  * @help
  * ============================================================================
  * Notetags:
  * ============================================================================
- * <Dice_mult> - Enables dice multiplier on this skill or item.
- * <Dice_mult:X> - Optional: sets a custom multiplier for this skill/item (X = number).
- * <Dice_sides:X> - Optional: sets a custom number of sides for the dice roll (X = number).
+ * <Dice_mult>         -> Enables dice multiplier using default multiplier
+ * <Dice_mult:X>       -> Sets custom multiplier (X = number)
+ * <Dice_sides:X>      -> Sets custom dice sides (X = number)
  *
- * Example Notetags:
- * <Dice_mult>             -> uses default multiplier and dice sides
- * <Dice_mult:1.5>         -> uses multiplier 1.5
- * <Dice_sides:8>          -> uses an 8-sided dice
+ * Example:
+ * <Dice_mult>
+ * <Dice_mult:1.5>
+ * <Dice_sides:8>
  *
- * The plugin automatically sets:
- *   $gameVariables.value(4) = dice roll result
- *   $gameVariables.value(5) = damage calculated
+ * Variables Used:
+ * 4 = Dice roll result
+ * 5 = Final damage/effect result
  *
- * In battle, it will display a line: "A [number] was rolled!"
- * The standard multipliers for a six sided dice ranging from 50% to 200% are calculated using this formula: 4 * attackStat * (0.5 + (roll - 1) * 0.3)
+ * In battle, displays:
+ * "A [number] was rolled!"
+ *
+ * Standard 6-sided scaling (50% to 200%) formula:
+ * (0.5 + (roll - 1) * 0.3)
  * ============================================================================
  */
 
 (() => {
+
     const pluginParams = PluginManager.parameters('DiceRollMultiplier');
     const DEFAULT_SIDES = Number(pluginParams['DefaultDiceSides'] || 6);
     const DEFAULT_MULT = Number(pluginParams['DefaultMultiplier'] || 1);
 
-    const _Dice_Result_makeDamageValue = Game_Action.prototype.makeDamageValue;
+    // Store original functions so I don't break the engine...
+    const _Dice_makeDamageValue = Game_Action.prototype.makeDamageValue;
+    const _Dice_applyItemEffect = Game_Action.prototype.applyItemEffect;
 
+// SKILL DAMAGE
     Game_Action.prototype.makeDamageValue = function(target, critical) {
         const item = this.item();
+        const subject = this.subject();
 
-        if (item && item.meta.Dice_mult !== undefined) {
-            const subject = this.subject();
+        // If skill has dice notetag
+        if (item && item.meta.Dice_mult !== undefined && DataManager.isSkill(item)) {
 
-            // Gets custom multiplier and dice sides from notetags or uses the defaults
             const multiplier = Number(item.meta.Dice_mult) || DEFAULT_MULT;
             const sides = Number(item.meta.Dice_sides) || DEFAULT_SIDES;
 
             // Rolls the dice, allows you to feel the fear in your enemy's eyes
             const roll = Math.floor(Math.random() * sides) + 1;
+            const diceScale = multiplier * (0.5 + (roll - 1) * 0.3);
+
             $gameVariables.setValue(4, roll);
 
-            // Damage calculations
+            let result = 0;
+
+            // Skills: calculate damage using ATK
             const attackStat = subject.atk;
-            const damage = multiplier * 4 * attackStat * (0.5 + (roll - 1) * 0.3);
-            $gameVariables.setValue(5, damage);
+            result = Math.floor(4 * attackStat * diceScale);
 
-            // Shows a message in battle log
-	if (BattleManager._logWindow) {
-            BattleManager._logWindow.push('addText', `A ${roll} was rolled!`);
+            $gameVariables.setValue(5, result);
 
-            return Math.max(0, Math.floor(damage));
+            if (BattleManager._logWindow) {
+                BattleManager._logWindow.push('addText', `A ${roll} was rolled!`);
+            }
+
+            return Math.max(0, result);
         }
 
-        return _Dice_Result_makeDamageValue.call(this, target, critical);
+        return _Dice_makeDamageValue.call(this, target, critical);
+    };
+
+
+// ITEM EFFECTS (Healing, MP Recovery, States, etc.)
+
+    Game_Action.prototype.applyItemEffect = function(target, effect) {
+        const item = this.item();
+
+        // If item has dice notetag
+        if (item && item.meta.Dice_mult !== undefined && DataManager.isItem(item)) {
+
+            const multiplier = Number(item.meta.Dice_mult) || DEFAULT_MULT;
+            const sides = Number(item.meta.Dice_sides) || DEFAULT_SIDES;
+
+            // Roll the dice, see where they may fall 
+            const roll = Math.floor(Math.random() * sides) + 1;
+            const diceScale = multiplier * (0.5 + (roll - 1) * 0.3);
+
+            $gameVariables.setValue(4, roll);
+
+            switch (effect.code) {
+
+                case Game_Action.EFFECT_RECOVER_HP:
+                    // HP Recovery (percentage + flat)
+                    {
+                        const baseHeal = target.mhp * effect.value1 + effect.value2;
+                        const result = Math.floor(baseHeal * diceScale);
+                        $gameVariables.setValue(5, result);
+                        target.gainHp(result);
+                    }
+                    break;
+
+                case Game_Action.EFFECT_RECOVER_MP:
+                    // MP Recovery (percentage + flat)
+                    {
+                        const baseMP = target.mmp * effect.value1 + effect.value2;
+                        const result = Math.floor(baseMP * diceScale);
+                        $gameVariables.setValue(5, result);
+                        target.gainMp(result);
+                    }
+                    break;
+
+                case Game_Action.EFFECT_ADD_STATE:
+                    // Random state application influenced by dice
+                    {
+                        if (Math.random() < diceScale) {
+                            target.addState(effect.dataId);
+                        }
+                    }
+                    break;
+
+                default:
+                    // Any other effect uses default engine behavior
+                    _Dice_applyItemEffect.call(this, target, effect);
+                    break;
+            }
+
+            if (BattleManager._logWindow) {
+                BattleManager._logWindow.push('addText', `A ${roll} was rolled!`);
+            }
+
+        } else {
+            _Dice_applyItemEffect.call(this, target, effect);
+        }
     };
 
 })();
